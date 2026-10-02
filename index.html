@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PPK Flight Report</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;700&family=Caveat:wght@500;700&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#eef0f2;--paper:#fbfbf8;--ink:#1c2430;--line:#8b94a0;--soft:#5d6875;--accent:#1f5fbf;--ink-hand:#1a3a8a}
+:root[data-theme="dark"]{--bg:#14181d;--paper:#1d232b;--ink:#e6e9ee;--line:#5b6673;--soft:#9aa4b1;--accent:#6ea3f0;--ink-hand:#9cc0ff}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14181d;--paper:#1d232b;--ink:#e6e9ee;--line:#5b6673;--soft:#9aa4b1;--accent:#6ea3f0;--ink-hand:#9cc0ff}}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:Archivo,system-ui,sans-serif;padding:20px 14px 48px}
+main{max-width:980px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--soft);font-size:14px;margin:0 0 18px}
+.bar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+button{font:600 14px Archivo,sans-serif;padding:10px 16px;border-radius:6px;border:1.5px solid var(--accent);background:transparent;color:var(--accent);cursor:pointer}
+button.p{background:var(--accent);color:var(--paper)}
+button:focus-visible,input:focus-visible{outline:3px solid var(--accent);outline-offset:1px}
+button:disabled{opacity:.4;cursor:not-allowed}
+.sheet{background:var(--paper);border:1px solid var(--line);padding:14px 14px 22px;overflow-x:auto}
+.title{font:700 30px Caveat,cursive;color:var(--ink-hand);text-align:center;border:0;background:transparent;width:100%}
+table{border-collapse:collapse;width:100%;min-width:560px}
+th,td{border:1px solid var(--line);padding:0;height:42px}
+th{font:700 13px Georgia,serif;text-align:left;padding:0 10px;width:190px;background:transparent}
+td input{width:100%;height:100%;box-sizing:border-box;border:0;background:transparent;color:var(--ink-hand);font:700 22px Caveat,cursive;text-align:center;padding:0 4px;min-width:90px}
+td.d{font:700 22px Caveat,cursive;color:var(--ink-hand);text-align:center}
+.drop{border:2px dashed var(--line);padding:6px;font-size:12px;color:var(--soft);text-align:center;cursor:pointer}
+.drop.ok{border-color:var(--accent);color:var(--accent)}
+.drop b{display:block}
+.rm{border:0;padding:2px 6px;font-size:12px;color:var(--soft)}
+.note{font-size:13px;color:var(--soft);margin-top:14px;line-height:1.5}
+</style>
+</head>
+<body>
+<main>
+<h1>PPK flight report</h1>
+<p class="sub">Add a flight column, drop its 4 files: result.csv, camera-command CSV, TIM2 CSV and *_events.pos (other PPK files are ignored) and the sheet fills itself.</p>
+<div class="bar">
+  <button class="p" id="add">Add flight</button>
+  <button id="pdf" disabled>Download PDF</button>
+</div>
+<div class="sheet">
+  <input class="title" id="title" value="PPK-42" aria-label="Sheet title">
+  <table id="t"></table>
+</div>
+<p class="note">Filled automatically: pictures (camera file), TIM2 (TIM2 file). Each camera command is paired with the next TIM2 event; commands with no event are interpolated images, and total points = selected − interpolated. Selected images = pictures unless a result.csv is added. Total points, fix, float and single are all counted directly from the events.pos file: total = number of rows, fix = Q1, float = Q2, single = anything else; fix = total − float − single. Drone ID, project and flight are typed by you. Every number can be corrected by hand.</p>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+let F=[];
+const mk=()=>({id:'',project:'',flight:'FL1',date:'',pictures:0,tim2:0,selected:0,interp:0,float:0,single:0,nontag:0,loaded:0});
+const pad=n=>String(n).padStart(2,'0');
+const D={
+ remaining:f=>f.pictures>=f.tim2?pad(f.pictures-f.tim2):'extra '+(f.tim2-f.pictures),
+ points:f=>f._evTotal!=null?f._evTotal:f.selected-f.interp,
+ fix:f=>f._evFix!=null?f._evFix:f.selected-f.interp-f.float-f.single,
+ tagged:f=>f.selected-f.nontag
+};
+const ROWS=[
+ ['DRONE ID','id','t'],['PROJECT NAME','project','t'],['PPK & FLIGHT NO.','flight','t'],['DATE','date','t'],
+ ['PICTURES','pictures','n'],['TIM2','tim2','n'],['REMAINING','remaining','d'],
+ ['TOTAL POINTS','points','d'],['FIX POINTS','fix','d'],['FLOAT POINTS','float','n'],['SINGLE POINTS','single','n'],
+ ['TOTAL SELECTED IMAGES','selected','n'],['TAGGED IMAGES','tagged','d'],['INTERPOLATED IMAGES','interp','n'],['Non-tagged','nontag','n']
+];
+function render(){
+  let h='<tr><th>Files</th>'+F.map((f,i)=>`<td><div class="drop ${f.loaded>=4?'ok':''}" data-i="${i}" tabindex="0"><b>${f.loaded}/4 files</b>${[['result',f.res],['camera',f._cam],['TIM2',f._tim],['events.pos',f.hasPos]].map(([n,v])=>(v?'✓ ':'✗ ')+n).join('<br>')}<br>drop or click<button class="rm" data-rm="${i}">remove</button></div></td>`).join('')+'</tr>';
+  for(const [lab,k,ty] of ROWS){
+    h+=`<tr><th>${lab}</th>`+F.map((f,i)=>ty==='d'?`<td class="d" data-d="${k}" data-i="${i}"></td>`:`<td><input data-k="${k}" data-i="${i}" ${ty==='n'?'type="number" inputmode="numeric"':''} value="${f[k]}"></td>`).join('')+'</tr>';
+  }
+  $('#t').innerHTML=h; upd();
+}
+function upd(){
+  document.querySelectorAll('[data-d]').forEach(c=>{c.textContent=D[c.dataset.d](F[c.dataset.i])});
+  $('#pdf').disabled=!F.length;
+}
+$('#t').addEventListener('input',e=>{
+  const k=e.target.dataset.k; if(!k)return;
+  F[e.target.dataset.i][k]=e.target.type==='number'?(+e.target.value||0):e.target.value; upd();
+});
+$('#t').addEventListener('click',e=>{
+  if(e.target.dataset.rm!==undefined){F.splice(+e.target.dataset.rm,1);render();return}
+  const d=e.target.closest('.drop'); if(d)pick(+d.dataset.i);
+});
+$('#t').addEventListener('dragover',e=>{if(e.target.closest('.drop'))e.preventDefault()});
+$('#t').addEventListener('drop',e=>{const d=e.target.closest('.drop');if(d){e.preventDefault();load(+d.dataset.i,[...e.dataTransfer.files])}});
+function pick(i){const inp=document.createElement('input');inp.type='file';inp.multiple=true;inp.accept='.csv,.stat,.pos';inp.onchange=()=>load(i,[...inp.files]);inp.click()}
+const tod=h=>h.split(':').reduce((a,x)=>a*60+ +x,0);
+const tsec=l=>{const p=l.split('_');return +p[3]*3600+p[4]*60+ +p[5]+p[6]/1000};
+function compute(f){
+  // Total points, fix, float and single are counted directly from events.pos rows (Q column: 1 fix, 2 float, other single).
+  if(f._ev&&f._ev.length){
+    let fx=0,fl=0,sg=0;
+    for(const e of f._ev){if(e.q===1)fx++;else if(e.q===2)fl++;else sg++}
+    f._evTotal=f._ev.length; f.float=fl; f.single=sg; f._evFix=fx;
+  }
+  if(f._cam&&f._tim&&!f.res){
+    // fallback only used when there's no result.csv: pictures/tim2 pairing gives selected/interpolated
+    const used=new Set();let un=0;
+    for(const c of f._cam){
+      let bk=-1,bd=1e9;
+      f._tim.forEach((t,k)=>{const d=t-c;if(!used.has(k)&&d>=-0.2&&d<=1.5&&d<bd){bd=d;bk=k}});
+      if(bk<0)un++;else used.add(bk);
+    }
+    f.selected=f.pictures;f.interp=un;
+  }
+}
+async function load(i,files){
+  const f=F[i];
+  for(const file of files){
+    if(/\.(ubx|2\dn|2\do|obs|nav)$/i.test(file.name)||(/\.pos$/i.test(file.name)&&!/events/i.test(file.name)))continue;
+    const txt=await file.text();
+    if(/^\$(POS|SAT|CLK|VELACC)/.test(txt)){
+      const m=new Map();
+      for(const l of txt.matchAll(/^\$POS,(\d+),([\d.]+),(\d+)/gm))m.set(Math.round((l[2]%86400)*10),+l[3]);
+      f._q=m;f.hasPos=1;continue;
+    }
+    if(/^%|^\d{4}\/\d\d\/\d\d /m.test(txt.slice(0,2000))&&/events/i.test(file.name)){
+      f._ev=[...txt.matchAll(/^\d{4}\/\d\d\/\d\d (\d\d:\d\d:[\d.]+)\s+\S+\s+\S+\s+\S+\s+(\d)/gm)].map(m=>({t:tod(m[1]),q:+m[2]}));
+      f.hasPos=1;continue;
+    }
+    const lines=txt.replace(/^\uFEFF/,'').split(/\r?\n/).filter(l=>l.trim());
+    if(/^image name/i.test(lines[0])){
+      const rows=lines.slice(1).map(r=>r.split(',')).filter(r=>r[0].trim()!=='');
+      f.selected=rows.length;
+      f.interp=rows.filter(r=>r[4].trim()==='').length;
+      f.res=1;
+    }else{
+      const ts=lines.filter(l=>/^\d\d_\d\d_\d{4}_/.test(l));
+      if(/tim2/i.test(file.name)){f.tim2=ts.length;f._tim=ts.map(tsec)}
+      else{f.pictures=ts.length;f._cam=ts.map(tsec);if(ts[0]){const p=ts[0].split('_');f.date=`${p[0]}/${p[1]}/${p[2]}`}}
+    }
+  }
+  f.loaded=(f.res?1:0)+(f._cam?1:0)+(f._tim?1:0)+(f.hasPos?1:0); compute(f); render();
+}
+$('#add').onclick=()=>{F.push(mk());render()};
+$('#pdf').onclick=()=>{
+  const {jsPDF}=window.jspdf, doc=new jsPDF({unit:'mm',format:'a4'});
+  const ttl=$('#title').value||'PPK Report';
+  doc.setFont('helvetica','bold');doc.setFontSize(20);doc.setTextColor(26,58,138);
+  doc.text(ttl,105,18,{align:'center'});
+  const val=(f,k)=>D[k]?D[k](f):f[k];
+  const body=ROWS.map(([lab,k])=>[lab,...F.map(f=>String(val(f,k)))]);
+  const cw=Math.min(40,(210-20-52)/F.length);
+  const cs={0:{cellWidth:52,fontStyle:'bold',font:'times',textColor:[30,30,30]}};
+  F.forEach((_,i)=>cs[i+1]={cellWidth:cw,halign:'center',textColor:[26,58,138],fontStyle:'bold'});
+  doc.autoTable({startY:26,body,theme:'grid',margin:{left:10,right:10},
+    styles:{fontSize:11,cellPadding:{top:4.2,bottom:4.2,left:2,right:2},lineColor:[110,118,130],lineWidth:.25,valign:'middle'},
+    columnStyles:cs});
+  doc.save(ttl.replace(/\W+/g,'_')+'.pdf');
+};
+F.push(mk());render();
+</script>
+</body>
+</html>
